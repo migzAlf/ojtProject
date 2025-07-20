@@ -1,20 +1,46 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
+//TODO 
+// 1. SETUP RPM API
+// 2. SETUP RPS API 
+// 3. CHANGE UI FROM RPS TO MMS (milimiter per step)
+// 4. ONLOAD UPDATE OF RPM/MMS
+// 5. INTERVAL UPDATE OF SIMULATION
+// 6. DOCUMENTATION
+
 // AP Credentials
 #define ssid "2AxisController"
 #define password "control123"
+
+#pragma region Debug_flags
+bool seeMaxMotorPos = true; 
+bool seeMotorPositions = true;
+#pragma endregion
+
+#pragma region utilFunctions 
+float mapRange (float value, float fromMin, float fromMax, float toMin, float toMax) {
+    return ((value - fromMin) / (fromMax - fromMin)) * (toMax - toMin) + toMin;
+} 
+float getRPM (float stepDelay) {
+    // Nema 17 Steps per revolution is 200
+    return 60000.0f / (stepDelay * 200.0f);
+}
+float getStepDelay (float rpm) {
+    return 60000.0f / (200.0f * rpm);
+}
+#pragma endregion
 
 #pragma region L298_input_pins
 #define IN1 14
 #define IN2 27
 #define IN3 26
-#define IN4 25
+#define IN4 13 // yung dating pin25 yung problema eh, nag jijitter ung X motor 
 
-#define IN5 15
-#define IN6 2
-#define IN7 0
-#define IN8 4
+#define IN5 4
+#define IN6 16
+#define IN7 17
+#define IN8 18
 #pragma endregion
 
 #pragma region Joystick_pins
@@ -38,12 +64,19 @@ const int reverseStepSequence[4][4] = {
   {0, 1, 1, 0},  // Step 2
   {1, 0, 1, 0}   // Step 1
 };
-int posX = 0;
-int posY = 0;
+float posX = 0.0f;
+float posY = 0.0f;
 
 int stepIndex = 0;
 unsigned long lastStepTime = 0;
-const int stepDelay = 2.5;  // milliseconds between steps (adjust to control speed)
+const float stepDelay = 2.5f;  // milliseconds between steps (adjust to control speed)
+// 2.5 - 120 rpm, 5 - 60 rpm 
+
+// Xmax: 240 @ 120 rpm
+// Ymax: 160 @ 120 rpm
+float maxX =  mapRange(240.0f, 0.0f, 120.0f, 0.0f, getRPM(stepDelay)); // in mm
+float maxY = mapRange(160.0f, 0.0f, 160.0f, 0.0f, getRPM(stepDelay)); // in mm
+
 #pragma endregion
 
 #pragma region AP_Setup
@@ -834,19 +867,19 @@ void handleRoot () {
             
             // 4. move right
             function moveRight() {
-                fetch("/set?move='right'");
+                fetch("/set?move=right");
             }
             // 5. move left
             function moveLeft() {
-                fetch("/set?move='left'");
+                fetch("/set?move=left");
             }
             // 6. move up 
             function moveUp() {
-                fetch("/set?move='up'");
+                fetch("/set?move=up");
             }
             // 7. move down
             function moveDown() {
-                fetch("/set?move='down'");
+                fetch("/set?move=down");
             }
 
             moveRightButton.addEventListener("click", moveRight);
@@ -892,19 +925,55 @@ void handleRoot () {
   )rawliteral");
 }
 
+// 50 is 1mm of movement
+float moveCountX = 50.0f;
+float moveCountY = 50.0f;
+
 void handleCommands () {
+
   argFunc("move", "right", []() {
-    moveRight();
+    if (posX + (moveCountX / 50.0f) <= maxX) {
+        posX += (moveCountX / 50.0f);
+        doX(moveCountX, [] () {
+            moveRight();
+        });
+        if (seeMotorPositions) Serial.println(posX);
+    }
   });
   argFunc("move", "left", []() {
-    moveLeft();
+    if (posX - (moveCountX / 50.0f) >= 0.0f) {
+        posX -= (moveCountX / 50.0f);
+        doX(moveCountX, [] () {
+            moveLeft();
+        });
+        if (seeMotorPositions) Serial.println(posX);
+    }
+    
   });
   argFunc("move", "up", []() {
-    moveUp();
+    if (posY + (moveCountY / 50.0f) <= maxY) {
+        posY += (moveCountY / 50.0f);
+        doX(moveCountY, [] () {
+            moveDown(); // inverted motor thats why down 
+        });
+        if (seeMotorPositions) Serial.println(posY);
+    }
   });
   argFunc("move", "down", []() {
-    moveDown();
+    if (posY - (moveCountY / 50.0f) >= 0.0f) {
+        posY -= (moveCountY / 50.0f);
+        doX(moveCountY, [] () {
+            moveUp(); // inverted motor thats why up
+        });
+        if (seeMotorPositions) Serial.println(posY);
+    }
   });
+}
+
+void doX (int amount, void (*func) ()) {
+    for (int i = 0; i < amount; i++) {
+        func();
+    }
 }
 
 void argFunc(String property, String value, void (*func)()) {
@@ -932,6 +1001,19 @@ void setupAP () {
 #pragma endregion
 
 #pragma region motorMovementFunctions
+void stopMotors() {
+  // Set all IN pins LOW to disable L298N output (no current in coils)
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+
+  digitalWrite(IN5, LOW); // if you're using a second L298N
+  digitalWrite(IN6, LOW);
+  digitalWrite(IN7, LOW);
+  digitalWrite(IN8, LOW);
+}
+
 void rotateMotor(int rpm, int steps, bool reverse) {
   int stepDelay = 60 / (nema17MotorSteps * rpm);
   int totalSteps = steps * 1;
@@ -979,6 +1061,8 @@ void rotateMotorCounterClockwise (bool secondMotor) {
     lastStepTime = millis();
     Serial.println("moving Y motor");
   }
+
+  Serial.println("Moving A Motor CC");
 }
 
 void rotateMotorClockwise (bool secondMotor) {
@@ -1013,6 +1097,8 @@ void rotateMotorClockwise (bool secondMotor) {
     lastStepTime = millis();
     Serial.println("moving X motor");
   }
+
+  Serial.println("Moving A Motor CC");
 }
 void moveRight() {
   rotateMotorCounterClockwise(false);
@@ -1029,28 +1115,46 @@ void moveDown() {
 #pragma endregion
 
 #pragma region handle_Joystick_Control
+float joystickXEquivStepDistance = 0.0941;
+float joystickYEquivStepDistance = 0.0627;
+
 void handleJoystick (bool printDebug, bool posDebug) {
    xVal = analogRead(JoystickX);
    yVal = analogRead(JoystickY);
 
     // Handle Joystick X-Axis Input        
     if (xVal > 4080) {
-        rotateMotorCounterClockwise(false);
-        posX++;
+        if (posX - joystickXEquivStepDistance >= 0.0f) {
+            moveRight();
+            posX -= joystickXEquivStepDistance;
+            if (seeMotorPositions) Serial.println(posX);
+        }
     } else if (xVal < 10) {
-        rotateMotorClockwise(false);
-        posX--;
+        if (posX + joystickXEquivStepDistance <= maxX) {
+            moveLeft();
+            posX += joystickXEquivStepDistance;
+            if (seeMotorPositions) Serial.println(posX);
+        }
     }
 
     // Handle Joystick Y-Axis Input        
     if (yVal > 4080) {
-      rotateMotorClockwise(true);
-      posY++;
+        if (posY - joystickYEquivStepDistance >= 0.0f) {
+            moveUp();
+            posY -= joystickYEquivStepDistance;
+            if (seeMotorPositions) Serial.println(posY);
+        }
     } else if (yVal < 10) {
-      rotateMotorCounterClockwise(true);    
-      posY--;
+        if (posY + joystickYEquivStepDistance <= maxY) {
+            moveDown();    
+            posY += joystickYEquivStepDistance;
+            if (seeMotorPositions) Serial.println(posY);
+        }
     }    
-
+    
+    if (xVal >= 10 && xVal <= 4080 && yVal >= 10 && yVal <= 4080) {
+        stopMotors();  
+    }
     if (posDebug) {
       Serial.print("Xpos: ");
       Serial.print(posX);
@@ -1067,12 +1171,27 @@ void handleJoystick (bool printDebug, bool posDebug) {
 }
 #pragma endregion
 
+#pragma region debugSetup 
+void debugFunction () {
+    if (seeMotorPositions) {
+        Serial.print("MaxX pos: ");
+        Serial.print(maxX);
+        Serial.print(" ,MaxY pos: ");
+        Serial.println(maxY);
+    }
+}
+#pragma endregion
+
+
 void setup() {
-  setPinModes();
-  Serial.begin(115200);
+    setPinModes();
+    Serial.begin(115200);
+    delay(2000);
+    setupAP();
+    debugFunction();
 }
 
 void loop() {
+  handleJoystick(false, false);  
   server.handleClient();
-  handleJoystick(false, true);  
 }
